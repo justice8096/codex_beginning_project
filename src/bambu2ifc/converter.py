@@ -32,10 +32,11 @@ def convert_bambu_to_ifc(
     *,
     schema: str = "IFC4",
     zip_output: bool = False,
+    strict: bool = True,
 ) -> ConversionResult:
     from .ifc_writer import write_ifc
 
-    build = parse_bambu_3mf(input_path)
+    build = parse_bambu_3mf(input_path, strict=strict)
     _validate(build)
     out = write_ifc(build, output_path, schema=schema, zip_output=zip_output)
     return ConversionResult(

@@ -7,11 +7,15 @@ import zipfile
 import ifcopenshell
 import ifcopenshell.guid
 
+from .errors import ValidationError
 from .metadata import compact_metadata
 from .models import Mesh, NormalizedBuild, apply_transform
 
 
 SUPPORTED_SCHEMAS = {"IFC4", "IFC2X3"}
+DEFAULT_MAX_TOTAL_VERTICES = 5_000_000
+DEFAULT_MAX_TOTAL_TRIANGLES = 10_000_000
+DEFAULT_MAX_OUTPUT_BYTES = 512 * 1024 * 1024
 
 
 def _guid() -> str:
@@ -97,12 +101,36 @@ def _create_pset(model: ifcopenshell.file, owner_history, product, metadata: dic
     )
 
 
+def _validate_geometry_budget(
+    build: NormalizedBuild,
+    *,
+    max_total_vertices: int,
+    max_total_triangles: int,
+) -> None:
+    total_vertices = 0
+    total_triangles = 0
+    for part in build.parts:
+        total_vertices += len(part.mesh.vertices)
+        total_triangles += len(part.mesh.triangles)
+    if total_vertices > max_total_vertices:
+        raise ValidationError(
+            f"Total vertex budget exceeded ({total_vertices} > {max_total_vertices})"
+        )
+    if total_triangles > max_total_triangles:
+        raise ValidationError(
+            f"Total triangle budget exceeded ({total_triangles} > {max_total_triangles})"
+        )
+
+
 def write_ifc(
     build: NormalizedBuild,
     output_path: str | Path,
     *,
     schema: str = "IFC4",
     zip_output: bool = False,
+    max_total_vertices: int = DEFAULT_MAX_TOTAL_VERTICES,
+    max_total_triangles: int = DEFAULT_MAX_TOTAL_TRIANGLES,
+    max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
 ) -> Path:
     schema = schema.upper()
     if schema not in SUPPORTED_SCHEMAS:
@@ -111,6 +139,12 @@ def write_ifc(
     out = Path(output_path)
     if zip_output and out.suffix.lower() != ".ifczip":
         out = out.with_suffix(".ifczip")
+
+    _validate_geometry_budget(
+        build,
+        max_total_vertices=max_total_vertices,
+        max_total_triangles=max_total_triangles,
+    )
 
     model = ifcopenshell.file(schema=schema)
     owner_history = _owner_history(model)
@@ -221,9 +255,25 @@ def write_ifc(
     if out.suffix.lower() == ".ifczip":
         uncompressed = out.with_suffix(".ifc")
         model.write(str(uncompressed))
+        uncompressed_size = uncompressed.stat().st_size
+        if uncompressed_size > max_output_bytes:
+            uncompressed.unlink(missing_ok=True)
+            raise ValidationError(
+                f"Generated IFC exceeds output size budget "
+                f"({uncompressed_size} > {max_output_bytes} bytes)"
+            )
         with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             zf.write(uncompressed, arcname=uncompressed.name)
         uncompressed.unlink(missing_ok=True)
     else:
         model.write(str(out))
+    if out.exists():
+        out_size = out.stat().st_size
+    else:
+        out_size = 0
+    if out_size > max_output_bytes:
+        out.unlink(missing_ok=True)
+        raise ValidationError(
+            f"Generated output exceeds output size budget ({out_size} > {max_output_bytes} bytes)"
+        )
     return out

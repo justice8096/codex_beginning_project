@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bambu2ifc"
+version = "0.1.0"
+description = "Convert Bambu 3MF build files into IFC BIM files."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "ifcopenshell>=0.8.0",
+]
+
+[project.scripts]
+bambu2ifc = "bambu2ifc.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

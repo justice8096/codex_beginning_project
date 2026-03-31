@@ -25,6 +25,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Force compressed IFC output (.ifczip).",
     )
+    parser.add_argument(
+        "--lenient",
+        action="store_true",
+        help="Allow unresolved component references and continue best-effort conversion.",
+    )
     return parser
 
 
@@ -37,6 +42,7 @@ def main(argv: list[str] | None = None) -> int:
             args.output,
             schema=args.schema,
             zip_output=args.zip,
+            strict=not args.lenient,
         )
     except Bambu2IfcError as exc:
         print(f"Conversion failed: {exc}", file=sys.stderr)

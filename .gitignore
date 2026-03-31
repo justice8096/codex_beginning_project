@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.tmp_pytest/
+pytest-cache-files-*/
+tmp/
+.tmp_post_commit_audit/
+.test_artifacts/
+output/*.ifc
+output/*.ifczip

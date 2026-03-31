@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import uuid
 
 import pytest
 
@@ -10,7 +11,13 @@ from bambu2ifc.ifc_writer import write_ifc
 from bambu2ifc.models import BuildMetadata, Mesh, NormalizedBuild, Part
 
 
-def test_writer_creates_ifc_with_expected_entities(tmp_path: Path):
+def _artifact_dir() -> Path:
+    path = Path(__file__).resolve().parents[1] / ".test_artifacts"
+    path.mkdir(exist_ok=True)
+    return path
+
+
+def test_writer_creates_ifc_with_expected_entities():
     build = NormalizedBuild(
         parts=[
             Part(
@@ -28,7 +35,7 @@ def test_writer_creates_ifc_with_expected_entities(tmp_path: Path):
             extras={"printer": "Bambu X1C"},
         ),
     )
-    out = write_ifc(build, tmp_path / "out.ifc", schema="IFC4")
+    out = write_ifc(build, _artifact_dir() / f"writer_{uuid.uuid4().hex}.ifc", schema="IFC4")
     model = ifcopenshell.open(str(out))
 
     assert len(model.by_type("IfcProject")) == 1

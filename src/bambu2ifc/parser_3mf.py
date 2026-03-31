@@ -15,6 +15,12 @@ from .models import (
     Part,
 )
 
+DEFAULT_MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
+DEFAULT_MAX_MODEL_BYTES = 64 * 1024 * 1024
+DEFAULT_MAX_MODEL_FILES = 256
+DEFAULT_MAX_VERTICES_PER_MESH = 2_000_000
+DEFAULT_MAX_TRIANGLES_PER_MESH = 4_000_000
+
 
 def _local_name(tag: str) -> str:
     if "}" in tag:
@@ -65,7 +71,12 @@ def _compose_transforms(a: Matrix3x4, b: Matrix3x4) -> Matrix3x4:
     )
 
 
-def _parse_mesh(mesh_el: ET.Element) -> Mesh:
+def _parse_mesh(
+    mesh_el: ET.Element,
+    *,
+    max_vertices: int = DEFAULT_MAX_VERTICES_PER_MESH,
+    max_triangles: int = DEFAULT_MAX_TRIANGLES_PER_MESH,
+) -> Mesh:
     vertices_el = _first_child(mesh_el, "vertices")
     triangles_el = _first_child(mesh_el, "triangles")
     if vertices_el is None or triangles_el is None:
@@ -82,6 +93,8 @@ def _parse_mesh(mesh_el: ET.Element) -> Mesh:
                 float(vertex.attrib["z"]),
             )
         )
+        if len(vertices) > max_vertices:
+            raise ParseError(f"Mesh vertex limit exceeded ({max_vertices})")
 
     triangles = []
     for triangle in triangles_el:
@@ -94,6 +107,8 @@ def _parse_mesh(mesh_el: ET.Element) -> Mesh:
                 int(triangle.attrib["v3"]),
             )
         )
+        if len(triangles) > max_triangles:
+            raise ParseError(f"Mesh triangle limit exceeded ({max_triangles})")
 
     if not vertices or not triangles:
         raise ParseError("Mesh has no geometry")
@@ -119,7 +134,12 @@ def _normalize_model_path(path: str) -> str:
     return path.lstrip("/")
 
 
-def _parse_model_file(model_xml: bytes) -> tuple[dict[str, ObjectDef], str]:
+def _parse_model_file(
+    model_xml: bytes,
+    *,
+    max_vertices_per_mesh: int = DEFAULT_MAX_VERTICES_PER_MESH,
+    max_triangles_per_mesh: int = DEFAULT_MAX_TRIANGLES_PER_MESH,
+) -> tuple[dict[str, ObjectDef], str]:
     root = ET.fromstring(model_xml)
     unit = root.attrib.get("unit", "millimeter")
     resources = _first_child(root, "resources")
@@ -139,7 +159,11 @@ def _parse_model_file(model_xml: bytes) -> tuple[dict[str, ObjectDef], str]:
             objects[object_id] = ObjectDef(
                 object_id=object_id,
                 name=name,
-                mesh=_parse_mesh(mesh_el),
+                mesh=_parse_mesh(
+                    mesh_el,
+                    max_vertices=max_vertices_per_mesh,
+                    max_triangles=max_triangles_per_mesh,
+                ),
                 components=[],
             )
             continue
@@ -167,20 +191,59 @@ def _parse_model_file(model_xml: bytes) -> tuple[dict[str, ObjectDef], str]:
     return objects, unit
 
 
-def parse_bambu_3mf(input_path: str | Path) -> NormalizedBuild:
+def _checked_model_read(
+    zf: zipfile.ZipFile,
+    model_path: str,
+    *,
+    max_model_bytes: int,
+) -> bytes:
+    try:
+        info = zf.getinfo(model_path)
+    except KeyError as exc:
+        raise ParseError(f"Referenced model file not found in archive: {model_path}") from exc
+    if info.file_size > max_model_bytes:
+        raise ParseError(
+            f"Model file '{model_path}' exceeds allowed size ({info.file_size} > {max_model_bytes} bytes)"
+        )
+    payload = zf.read(model_path)
+    if len(payload) > max_model_bytes:
+        raise ParseError(
+            f"Model file '{model_path}' exceeds allowed size after read ({len(payload)} > {max_model_bytes} bytes)"
+        )
+    return payload
+
+
+def parse_bambu_3mf(
+    input_path: str | Path,
+    *,
+    strict: bool = True,
+    max_archive_bytes: int = DEFAULT_MAX_ARCHIVE_BYTES,
+    max_model_bytes: int = DEFAULT_MAX_MODEL_BYTES,
+    max_model_files: int = DEFAULT_MAX_MODEL_FILES,
+    max_vertices_per_mesh: int = DEFAULT_MAX_VERTICES_PER_MESH,
+    max_triangles_per_mesh: int = DEFAULT_MAX_TRIANGLES_PER_MESH,
+) -> NormalizedBuild:
     path = Path(input_path)
     if not path.name.lower().endswith(".3mf"):
         raise InputFormatError(f"Unsupported input extension for {path.name}. Expected .3mf")
 
     try:
         with zipfile.ZipFile(path, mode="r") as zf:
+            total_uncompressed = sum(info.file_size for info in zf.infolist())
+            if total_uncompressed > max_archive_bytes:
+                raise InputFormatError(
+                    f"3MF archive exceeds allowed uncompressed size "
+                    f"({total_uncompressed} > {max_archive_bytes} bytes)"
+                )
             all_models = [name for name in zf.namelist() if name.lower().endswith(".model")]
+            if len(all_models) > max_model_files:
+                raise ParseError(f"Too many .model files in archive ({len(all_models)} > {max_model_files})")
             root_model_path = "3D/3dmodel.model" if "3D/3dmodel.model" in all_models else next(iter(all_models), None)
             if root_model_path is None:
                 raise ParseError("No .model XML found inside .3mf package")
 
             model_registry: dict[str, dict[str, ObjectDef]] = {}
-            root_xml = zf.read(root_model_path)
+            root_xml = _checked_model_read(zf, root_model_path, max_model_bytes=max_model_bytes)
             root = ET.fromstring(root_xml)
             metadata_raw: dict[str, str] = {}
             for child in root:
@@ -188,14 +251,23 @@ def parse_bambu_3mf(input_path: str | Path) -> NormalizedBuild:
                     key = _attr_local(child.attrib, "name") or "metadata"
                     metadata_raw[key] = (child.text or "").strip()
 
-            root_objects, unit = _parse_model_file(root_xml)
+            root_objects, unit = _parse_model_file(
+                root_xml,
+                max_vertices_per_mesh=max_vertices_per_mesh,
+                max_triangles_per_mesh=max_triangles_per_mesh,
+            )
             model_registry[root_model_path] = root_objects
 
             for model_path in all_models:
                 if model_path == root_model_path:
                     continue
                 try:
-                    objects, _ = _parse_model_file(zf.read(model_path))
+                    model_xml = _checked_model_read(zf, model_path, max_model_bytes=max_model_bytes)
+                    objects, _ = _parse_model_file(
+                        model_xml,
+                        max_vertices_per_mesh=max_vertices_per_mesh,
+                        max_triangles_per_mesh=max_triangles_per_mesh,
+                    )
                     model_registry[model_path] = objects
                 except ET.ParseError as exc:
                     raise ParseError(f"Unable to parse model file {model_path}: {exc}") from exc
@@ -212,15 +284,21 @@ def parse_bambu_3mf(input_path: str | Path) -> NormalizedBuild:
     ) -> list[Part]:
         key = (model_path, object_id)
         if key in seen:
+            if strict:
+                raise ParseError(f"Cyclic component reference detected at {model_path}:{object_id}")
             return []
         seen = set(seen)
         seen.add(key)
 
         model_objects = model_registry.get(model_path)
         if not model_objects:
+            if strict:
+                raise ParseError(f"Referenced model path not loaded: {model_path}")
             return []
         obj = model_objects.get(object_id)
         if obj is None:
+            if strict:
+                raise ParseError(f"Referenced object not found: {model_path}:{object_id}")
             return []
 
         if obj.mesh is not None:
@@ -237,7 +315,13 @@ def parse_bambu_3mf(input_path: str | Path) -> NormalizedBuild:
         for comp in obj.components:
             child_model = comp.path or model_path
             child_transform = _compose_transforms(transform, comp.transform)
-            resolved.extend(resolve_object(child_model, comp.object_id, child_transform, seen))
+            try:
+                resolved.extend(resolve_object(child_model, comp.object_id, child_transform, seen))
+            except ParseError:
+                if strict:
+                    raise
+        if strict and not resolved:
+            raise ParseError(f"Object contains no resolvable mesh components: {model_path}:{object_id}")
         return resolved
 
     parts: list[Part] = []
@@ -248,6 +332,8 @@ def parse_bambu_3mf(input_path: str | Path) -> NormalizedBuild:
                 continue
             object_id = _attr_local(item.attrib, "objectid")
             if not object_id:
+                if strict:
+                    raise ParseError("Build item is missing required objectid")
                 continue
             item_transform = _parse_transform(_attr_local(item.attrib, "transform"))
             resolved = resolve_object(root_model_path, object_id, item_transform, set())

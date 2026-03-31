@@ -4,6 +4,9 @@ from pathlib import Path
 import zipfile
 import uuid
 
+import pytest
+
+from bambu2ifc.errors import ParseError
 from bambu2ifc.parser_3mf import parse_bambu_3mf
 
 
@@ -42,6 +45,40 @@ def _artifact_dir() -> Path:
     return path
 
 
+def _write_partial_component_3mf(path: Path) -> None:
+    root_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
+  <resources>
+    <object id="1" type="model">
+      <components>
+        <component objectid="2"/>
+        <component objectid="99"/>
+      </components>
+    </object>
+    <object id="2" name="FallbackMesh">
+      <mesh>
+        <vertices>
+          <vertex x="0" y="0" z="0"/>
+          <vertex x="1" y="0" z="0"/>
+          <vertex x="0" y="1" z="0"/>
+        </vertices>
+        <triangles>
+          <triangle v1="0" v2="1" v3="2"/>
+        </triangles>
+      </mesh>
+    </object>
+  </resources>
+  <build>
+    <item objectid="1"/>
+  </build>
+</model>
+"""
+    with zipfile.ZipFile(path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("3D/3dmodel.model", root_xml)
+        zf.writestr("[Content_Types].xml", "")
+        zf.writestr("_rels/.rels", "")
+
+
 def test_parse_3mf_extracts_geometry_and_metadata():
     path = _artifact_dir() / f"minimal_{uuid.uuid4().hex}.3mf"
     _write_minimal_3mf(path)
@@ -55,3 +92,17 @@ def test_parse_3mf_extracts_geometry_and_metadata():
     assert build.parts[0].transform[3] == 5.0
     assert build.parts[0].transform[7] == 6.0
     assert build.parts[0].transform[11] == 7.0
+
+
+def test_parse_3mf_strict_mode_rejects_unresolved_components():
+    path = _artifact_dir() / f"broken_{uuid.uuid4().hex}.3mf"
+    _write_partial_component_3mf(path)
+    with pytest.raises(ParseError):
+        parse_bambu_3mf(path)
+
+
+def test_parse_3mf_lenient_mode_skips_unresolved_components():
+    path = _artifact_dir() / f"broken_lenient_{uuid.uuid4().hex}.3mf"
+    _write_partial_component_3mf(path)
+    build = parse_bambu_3mf(path, strict=False)
+    assert len(build.parts) == 1

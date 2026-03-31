@@ -9,7 +9,7 @@ description = "Convert Bambu 3MF build files into IFC BIM files."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "ifcopenshell>=0.8.0",
+  "ifcopenshell==0.8.4.post1",
 ]
 
 [project.scripts]

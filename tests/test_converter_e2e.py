@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import zipfile
+import uuid
 
 import pytest
 
@@ -38,9 +39,15 @@ def _write_minimal_3mf(path: Path) -> None:
         zf.writestr("_rels/.rels", "")
 
 
-def test_e2e_convert_minimal_file(tmp_path: Path):
-    input_path = tmp_path / "in.3mf"
-    output_path = tmp_path / "out.ifc"
+def _artifact_dir() -> Path:
+    path = Path(__file__).resolve().parents[1] / ".test_artifacts"
+    path.mkdir(exist_ok=True)
+    return path
+
+
+def test_e2e_convert_minimal_file():
+    input_path = _artifact_dir() / f"in_{uuid.uuid4().hex}.3mf"
+    output_path = _artifact_dir() / f"out_{uuid.uuid4().hex}.ifc"
     _write_minimal_3mf(input_path)
 
     result = convert_bambu_to_ifc(input_path, output_path, schema="IFC4")
